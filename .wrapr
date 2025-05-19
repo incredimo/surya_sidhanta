@@ -34,9 +34,11 @@
     "**/Cargo.lock"
   ],
   "selected_files": [
-    ".\\Cargo.toml",
     ".\\src\\main.rs",
-    ".\\validate.py"
+    ".\\Cargo.toml",
+    ".\\generate_corrections.py",
+    ".\\validate.py",
+    ".\\readme.md"
   ],
   "last_limit": null,
   "max_file_size": 1000000
