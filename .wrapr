@@ -1,0 +1,43 @@
+{
+  "excluded_patterns": [
+    "**/.git/**",
+    "**/.svn/**",
+    "**/.hg/**",
+    "**/node_modules/**",
+    "**/target/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/vendor/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "**/*.min.*",
+    "**/*.bundle.*",
+    "**/*.png",
+    "**/*.jpg",
+    "**/*.jpeg",
+    "**/*.gif",
+    "**/*.ico",
+    "**/*.svg",
+    "**/*.woff",
+    "**/*.woff2",
+    "**/*.ttf",
+    "**/*.eot",
+    "**/*.pdf",
+    "**/*.zip",
+    "**/*.gz",
+    "**/*.exe",
+    "**/*.dll",
+    "**/*.so",
+    "**/*.dylib",
+    "**/package-lock.json",
+    "**/yarn.lock",
+    "**/Cargo.lock"
+  ],
+  "selected_files": [
+    ".\\Cargo.toml",
+    ".\\src\\main.rs",
+    ".\\validate.py"
+  ],
+  "last_limit": null,
+  "max_file_size": 1000000
+}
