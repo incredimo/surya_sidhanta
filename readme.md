@@ -310,6 +310,10 @@ To assess the accuracy of the Sūrya Siddhānta implementation, `validate.py` co
         return swiss_positions
     ```
 
+![Validation Plot](Figure_1.png)
+ 
+ 
+
 ### Error Correction Generator (`generate_corrections.py`)
 
 While historically significant, the Sūrya Siddhānta's accuracy doesn't meet modern needs. `generate_corrections.py` aims to bridge this gap by modeling the errors and generating correction terms.
