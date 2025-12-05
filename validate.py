@@ -1,189 +1,164 @@
 #!/usr/bin/env python3
 """
-validate_siddhanta.py
-
-Compare the classical Surya Siddhānta Rust implementation
-against Swiss Ephemeris (DE431) over a long time period,
-and plot both longitude time-series (Rust vs Swiss) for each body.
-
-Usage:
-    ./validate_siddhanta.py \
-      --datetime 2025-05-19T13:51:26 \
-      --start 2000-01-01 \
-      --end   2100-01-01 \
-      --step  30
+validate_robust.py (Debug Edition)
 """
+
 import os
 import sys
 import subprocess
 import argparse
-import math
-from datetime import datetime, timedelta
+import platform
 import numpy as np
 import pandas as pd
+import swisseph as swe
 import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+from tqdm import tqdm
 
-# -------------------------------------------------------------------
-# 1) Ensure Python dependencies are installed
-# -------------------------------------------------------------------
-def install_pydeps():
-    deps = ["pyswisseph", "numpy", "pandas", "matplotlib"]
-    for pkg in deps:
-        subprocess.run([
-            sys.executable, "-m", "pip", "install", "--upgrade", pkg
-        ], check=True)
+AYANAMSHA_MODE = swe.SIDM_LAHIRI 
 
-# -------------------------------------------------------------------
-# 2) Ensure Rust code is built (uses existing Cargo.toml in repo root)
-# -------------------------------------------------------------------
-RUST_CWD = os.path.dirname(os.path.abspath(__file__))
+# Detect OS
+IS_WINDOWS = platform.system() == "Windows"
+BIN_EXT = ".exe" if IS_WINDOWS else ""
+RUST_BIN_PATH = os.path.join(".", "target", "release", f"surya_sidhanta{BIN_EXT}")
 
-def build_rust():
-    subprocess.run([
-        "cargo", "build", "--release"
-    ], cwd=RUST_CWD, check=True)
+PLANETS = ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn", "Rahu", "Ketu"]
 
-# -------------------------------------------------------------------
-# 3) Run the Rust calculator and parse its output
-# -------------------------------------------------------------------
-PLANETS = ["Sun", "Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Rahu", "Ketu"]
-
-def run_rust(dt_iso):
-    cmd = ["cargo", "run", "--release", "--", dt_iso]
-    p = subprocess.run(
-        cmd,
-        cwd=RUST_CWD,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        encoding='utf-8',
-        errors='ignore'
-    )
-    if p.returncode != 0:
-        print(p.stderr, file=sys.stderr)
+def install_check():
+    if not os.path.exists(RUST_BIN_PATH):
+        print(f"ERROR: Rust binary not found at {RUST_BIN_PATH}")
+        print("Please run: cargo build --release")
         sys.exit(1)
-    out = {}
-    for line in p.stdout.splitlines():
-        parts = line.strip().split()
-        if len(parts) == 3 and parts[0] in PLANETS:
-            body, lon, _lat = parts
-            out[body] = float(lon)
-    return out
 
-# -------------------------------------------------------------------
-# 4) Fetch Swiss Ephemeris longitudes via pyswisseph
-# -------------------------------------------------------------------
-def get_swiss(dt, bodies):
-    import swisseph as swe
-    ephe = os.environ.get("SWISS_EPHE_PATH", "./ephe")
-    swe.set_ephe_path(ephe)
-    # Use sidereal mode (Lahiri)
-    swe.set_sid_mode(swe.SIDM_LAHIRI, 0, 0)
+def smallest_signed_angle(a, b):
+    d = a - b
+    d = (d + 180) % 360 - 180
+    return d
 
-    # Compute Julian Day UT
-    jd = swe.julday(
-        dt.year, dt.month, dt.day,
-        dt.hour + dt.minute/60 + dt.second/3600
-    )
-    swiss = {}
+def get_rust_positions(dt, debug=False):
+    dt_iso = dt.strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        result = subprocess.run(
+            [RUST_BIN_PATH, dt_iso],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Rust execution failed: {e.stderr}")
+        return {}
+
+    # DEBUG: If parsing fails later, we want to know what this output was
+    if debug:
+        print(f"\n[DEBUG] Raw Output for {dt_iso}:\n{result.stdout}")
+
+    positions = {}
+    for line in result.stdout.splitlines():
+        parts = line.split('|')
+        # We need at least Body|Lon. Filter out headers or garbage.
+        if len(parts) >= 2 and parts[0] in PLANETS:
+            try:
+                positions[parts[0]] = float(parts[1])
+            except ValueError:
+                continue
+    
+    return positions
+
+def get_swiss_positions(dt):
+    swe.set_ephe_path(os.getenv("SWISS_EPHE_PATH", "./ephe"))
+    swe.set_sid_mode(AYANAMSHA_MODE, 0, 0)
+    jd = swe.julday(dt.year, dt.month, dt.day, dt.hour + dt.minute/60.0 + dt.second/3600.0)
+    
+    positions = {}
     mapping = {
-        "Sun": swe.SUN, "Moon": swe.MOON,
-        "Mercury": swe.MERCURY, "Venus": swe.VENUS,
-        "Mars": swe.MARS, "Jupiter": swe.JUPITER,
+        "Sun": swe.SUN, "Moon": swe.MOON, 
+        "Mars": swe.MARS, "Mercury": swe.MERCURY, 
+        "Jupiter": swe.JUPITER, "Venus": swe.VENUS, 
         "Saturn": swe.SATURN
     }
-    for b in bodies:
-        if b in mapping:
-            lon = swe.calc_ut(jd, mapping[b], swe.FLG_SWIEPH | swe.FLG_SIDEREAL)[0][0]
-        elif b == "Rahu":
-            lon = swe.calc_ut(jd, swe.MEAN_NODE, swe.FLG_SWIEPH | swe.FLG_SIDEREAL)[0][0]
-        elif b == "Ketu":
-            asc = swe.calc_ut(jd, swe.MEAN_NODE, swe.FLG_SWIEPH | swe.FLG_SIDEREAL)[0][0]
-            lon = (asc + 180.0) % 360
-        else:
-            raise ValueError(f"Unknown body: {b}")
-        swiss[b] = lon
-    return swiss
+    flags = swe.FLG_SWIEPH | swe.FLG_SIDEREAL | swe.FLG_SPEED
+    
+    for name, pid in mapping.items():
+        res = swe.calc_ut(jd, pid, flags)
+        positions[name] = res[0][0]
+        
+    rahu_res = swe.calc_ut(jd, swe.MEAN_NODE, flags)
+    rahu_lon = rahu_res[0][0]
+    positions["Rahu"] = rahu_lon
+    positions["Ketu"] = (rahu_lon + 180.0) % 360.0
+    
+    return positions
 
-# -------------------------------------------------------------------
-# 5) Build a time-series of both Rust and Swiss longitudes
-# -------------------------------------------------------------------
-def build_timeseries(start, end, step_days):
+def run_suite(start_date, end_date, steps):
+    total_seconds = (end_date - start_date).total_seconds()
+    step_size = total_seconds / steps
     records = []
-    dt = start
-    while dt <= end:
-        iso = dt.strftime("%Y-%m-%dT%H:%M:%S")
-        rust = run_rust(iso)
-        swiss = get_swiss(dt, PLANETS)
-        for b in PLANETS:
-            records.append({
-                "date": dt,
-                "body": b,
-                "rust_lon": rust[b],
-                "swiss_lon": swiss[b]
-            })
-        dt += timedelta(days=step_days)
+    
+    # Check first frame for debug purposes
+    print("Checking binary output format...")
+    first_check = get_rust_positions(start_date, debug=True)
+    if not first_check:
+        print("\n[CRITICAL ERROR] Could not parse any planets from Rust binary.")
+        print("Expected format: 'Sun|123.45|...'")
+        print("Please ensure src/main.rs matches the Pipe-delimited format.")
+        sys.exit(1)
+    else:
+        print(f"Successfully parsed {len(first_check)} bodies. Starting sequence...")
+
+    for i in tqdm(range(steps + 1)):
+        current_dt = start_date + timedelta(seconds=i * step_size)
+        rust_pos = get_rust_positions(current_dt)
+        swiss_pos = get_swiss_positions(current_dt)
+        
+        for body in PLANETS:
+            if body in rust_pos and body in swiss_pos:
+                err = smallest_signed_angle(swiss_pos[body], rust_pos[body])
+                records.append({
+                    "body": body,
+                    "error_min": err * 60.0,
+                    "timestamp": current_dt
+                })
+
     return pd.DataFrame(records)
 
-# -------------------------------------------------------------------
-# 6) Plotting both series per body
-# -------------------------------------------------------------------
-def plot_both(df):
-    bodies = df['body'].unique()
-    n = len(bodies)
-    fig, axes = plt.subplots(n, 1, figsize=(12, 2*n), sharex=True)
-    for ax, b in zip(axes, bodies):
-        sub = df[df['body'] == b]
-        ax.plot(sub['date'], sub['rust_lon'], label='Rust (Surya Siddhanta)')
-        ax.plot(sub['date'], sub['swiss_lon'], label='Swiss Ephemeris')
-        ax.set_ylabel(f"{b} Lon (°)")
-        ax.legend(loc='upper right', fontsize='small')
-        ax.grid(True)
-    axes[-1].set_xlabel("Date")
-    fig.autofmt_xdate()
-    plt.tight_layout()
-    plt.show()
-
-# -------------------------------------------------------------------
-# 7) Main entry point
-# -------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--datetime", required=True,
-                        help="ISO date-time, e.g. 2025-05-19T13:51:26")
-    parser.add_argument("--start", required=True,
-                        help="Start date YYYY-MM-DD")
-    parser.add_argument("--end", required=True,
-                        help="End date   YYYY-MM-DD")
-    parser.add_argument("--step", type=int, default=30,
-                        help="Days between samples")
+    parser.add_argument("--start", default="2023-01-01")
+    parser.add_argument("--end", default="2025-01-01")
+    parser.add_argument("--samples", type=int, default=100)
     args = parser.parse_args()
-
-    print("Installing Python dependencies…")
-    install_pydeps()
-
-    print("Building Rust implementation…")
-    build_rust()
-
-    # Single-epoch comparison
-    dt0 = datetime.fromisoformat(args.datetime)
-    rust0 = run_rust(args.datetime)
-    swiss0 = get_swiss(dt0, PLANETS)
-    print("=== Single-epoch Rust vs Swiss (deg) ===")
-    print(f"Date/Time: {args.datetime}")
-    print(f"{'Body':<8}{'Rust':>12}{'Swiss':>12}{'Δ (′)':>10}")
-    for b in PLANETS:
-        ddeg = ((rust0[b] - swiss0[b] + 180) % 360) - 180
-        dm = ddeg * 60
-        print(f"{b:<8}{rust0[b]:>12.6f}{swiss0[b]:>12.6f}{dm:>10.2f}")
-
-    # Multi-epoch time series
-    print("\nBuilding multi-epoch time series…")
-    start = datetime.fromisoformat(args.start + "T00:00:00")
-    end   = datetime.fromisoformat(args.end   + "T00:00:00")
-    df = build_timeseries(start, end, args.step)
-
-    print("Plotting time-series…")
-    plot_both(df)
+    
+    install_check()
+    
+    s = datetime.strptime(args.start, "%Y-%m-%d")
+    e = datetime.strptime(args.end, "%Y-%m-%d")
+    
+    df = run_suite(s, e, args.samples)
+    
+    if not df.empty:
+        print("\n" + "="*60)
+        print(f"{'RMS ERROR (Arc-Minutes) [Lower is Better]':^60}")
+        print("="*60)
+        stats = df.groupby('body')['error_min'].agg(lambda x: np.sqrt(np.mean(x**2)))
+        print(stats.to_string(float_format="{:.2f}".format))
+        print("="*60)
+        
+        # Plot
+        bodies = df['body'].unique()
+        fig, axes = plt.subplots(len(bodies), 1, figsize=(10, 2*len(bodies)), sharex=True)
+        if len(bodies) == 1: axes = [axes]
+        
+        for ax, body in zip(axes, bodies):
+            sub = df[df['body'] == body]
+            ax.plot(sub['timestamp'], sub['error_min'])
+            ax.set_ylabel(f"{body} Error (')")
+            ax.grid(True)
+            
+        plt.tight_layout()
+        plt.savefig("validation_report.png")
+        print("\nReport saved to validation_report.png")
+    else:
+        print("\n[ERROR] No data collected. Check the debug output above.")
 
 if __name__ == "__main__":
     main()
